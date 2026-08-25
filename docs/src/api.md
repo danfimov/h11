@@ -1,0 +1,1009 @@
+# API documentation
+
+h11-mypyc has a fairly small public API, with all public symbols available directly at
+the top level:
+
+```pycon
+>>> import h11_mypyc
+>>> h11_mypyc.<TAB>
+h11_mypyc.CLIENT                 h11_mypyc.MUST_CLOSE
+h11_mypyc.CLOSED                 h11_mypyc.NEED_DATA
+h11_mypyc.Connection             h11_mypyc.PAUSED
+h11_mypyc.ConnectionClosed       h11_mypyc.PRODUCT_ID
+h11_mypyc.DONE                   h11_mypyc.ProtocolError
+h11_mypyc.Data                   h11_mypyc.RemoteProtocolError
+h11_mypyc.ERROR                  h11_mypyc.Request
+h11_mypyc.EndOfMessage           h11_mypyc.Response
+h11_mypyc.Event                  h11_mypyc.SEND_BODY
+h11_mypyc.IDLE                   h11_mypyc.SEND_RESPONSE
+h11_mypyc.InformationalResponse  h11_mypyc.SERVER
+h11_mypyc.LocalProtocolError     h11_mypyc.SWITCHED_PROTOCOL
+h11_mypyc.MIGHT_SWITCH_PROTOCOL
+```
+
+These symbols fall into three main categories: event classes, special constants
+used to track different connection states, and the
+[`Connection`][h11_mypyc.Connection] class itself. We'll describe them in that order.
+
+## Events { #events }
+
+*Events* are the core of h11-mypyc: the whole point of h11-mypyc is to let you think about
+HTTP transactions as being a series of events sent back and forth between a
+client and a server, instead of thinking in terms of bytes.
+
+All events behave in essentially similar ways. Let's take
+[`Request`][h11_mypyc.Request] as an example. Like all events, this is a "final" class
+-- you cannot subclass it. And like all events, it has several fields. For
+[`Request`][h11_mypyc.Request], there are four of them: `method`, `target`, `headers`,
+and `http_version`. `http_version` defaults to `b"1.1"`; the rest have no
+default, so to create a [`Request`][h11_mypyc.Request] you have to specify their
+values:
+
+```pycon
+>>> req = h11_mypyc.Request(method="GET",
+...                         target="/",
+...                         headers=[("Host", "example.com")])
+```
+
+Event constructors accept only keyword arguments, not positional arguments.
+
+Events have a useful repr:
+
+```pycon
+>>> req
+Request(method=b'GET', headers=<Headers([(b'host', b'example.com')])>, target=b'/', http_version=b'1.1')
+```
+
+And their fields are available as regular attributes:
+
+```pycon
+>>> req.method
+b'GET'
+>>> req.target
+b'/'
+>>> req.headers
+<Headers([(b'host', b'example.com')])>
+>>> req.http_version
+b'1.1'
+```
+
+Notice that these attributes have been normalized to byte-strings. In general,
+events normalize and validate their fields when they're constructed. Some of
+these normalizations and checks are specific to a particular event -- for
+example, [`Request`][h11_mypyc.Request] enforces RFC 7230's requirement that HTTP/1.1
+requests must always contain a `"Host"` header:
+
+```pycon
+>>> # HTTP/1.0 requests don't require a Host: header
+... h11_mypyc.Request(method="GET", target="/", headers=[], http_version="1.0")
+Request(method=b'GET', headers=<Headers([])>, target=b'/', http_version=b'1.0')
+```
+
+```pycon
+>>> # But HTTP/1.1 requests do
+... h11_mypyc.Request(method="GET", target="/", headers=[])
+Traceback (most recent call last):
+    ...
+h11_mypyc._util.LocalProtocolError: Missing mandatory Host: header
+```
+
+This helps protect you from accidentally violating the protocol, and also helps
+protect you from remote peers who attempt to violate the protocol.
+
+A few of these normalization rules are standard across multiple events, so we
+document them here:
+
+### Header normalization rules { #headers-format }
+
+In h11-mypyc, headers are represented internally as a list of (*name*, *value*) pairs,
+where *name* and *value* are both byte-strings, *name* is always lowercase, and
+*name* and *value* are both guaranteed not to have any leading or trailing
+whitespace. When constructing an event, we accept any iterable of pairs like
+this, and will automatically convert native strings containing ascii or
+[bytes-like objects](https://docs.python.org/3/glossary.html#term-bytes-like-object)
+to byte-strings and convert names to lowercase:
+
+```pycon
+>>> original_headers = [("HOST", bytearray(b"Example.Com"))]
+>>> req = h11_mypyc.Request(method="GET", target="/", headers=original_headers)
+>>> original_headers
+[('HOST', bytearray(b'Example.Com'))]
+>>> req.headers
+<Headers([(b'host', b'Example.Com')])>
+```
+
+If any names are detected with leading or trailing whitespace, then this is an
+error ("in the past, differences in the handling of such whitespace have led to
+security vulnerabilities" --
+[RFC 7230](https://tools.ietf.org/html/rfc7230#section-3.2.4)). We also check for
+certain other protocol violations, e.g. it's always illegal to have a newline
+inside a header value, and `Content-Length: hello` is an error because
+`Content-Length` should always be an integer. We may add additional checks in the
+future.
+
+While we make sure to expose header names as lowercased bytes, we also preserve
+the original header casing that is used. Compliant HTTP agents should always
+treat headers in a case insensitive manner, but this may not always be the case.
+When sending bytes over the wire we send headers preserving whatever original
+header casing was used.
+
+It is possible to access the headers in their raw original casing, which may be
+useful for some user output or debugging purposes.
+
+```pycon
+>>> original_headers = [("Host", "example.com")]
+>>> req = h11_mypyc.Request(method="GET", target="/", headers=original_headers)
+>>> req.headers.raw_items()
+[(b'Host', b'example.com')]
+```
+
+### HTTP version normalization rules { #http-version-format }
+
+It's not just headers we normalize to being byte-strings: the same
+type-conversion logic is also applied to the `Request.method` and
+`Request.target` field, and -- for consistency -- all `http_version` fields. In
+particular, we always represent HTTP version numbers as byte-strings like
+`b"1.1"`.
+[Bytes-like objects](https://docs.python.org/3/glossary.html#term-bytes-like-object)
+and native strings will be automatically converted to byte strings. Note that the
+HTTP standard
+[specifically guarantees](https://tools.ietf.org/html/rfc7230#section-2.6) that
+all HTTP version numbers will consist of exactly two digits separated by a dot,
+so comparisons like `req.http_version < b"1.1"` are safe and valid.
+
+When manually constructing an event, you generally shouldn't specify
+`http_version`, because it defaults to `b"1.1"`, and if you attempt to override
+this to some other value then [`Connection.send()`][h11_mypyc.Connection.send] will
+reject your event -- h11-mypyc only speaks HTTP/1.1. But it does understand other
+versions of HTTP, so you might receive events with other `http_version` values
+from remote peers.
+
+### Event reference
+
+Here's the complete set of events supported by h11-mypyc:
+
+::: h11_mypyc.Request
+
+::: h11_mypyc.InformationalResponse
+
+::: h11_mypyc.Response
+
+::: h11_mypyc.Data
+
+::: h11_mypyc.EndOfMessage
+
+::: h11_mypyc.ConnectionClosed
+
+## The state machine { #state-machine }
+
+Now that you know what the different events are, the next question is: what can
+you do with them?
+
+A basic HTTP request/response cycle looks like this:
+
+- The client sends:
+
+    - one [`Request`][h11_mypyc.Request] event with request metadata and headers,
+    - zero or more [`Data`][h11_mypyc.Data] events with the request body (if any),
+    - and an [`EndOfMessage`][h11_mypyc.EndOfMessage] event.
+
+- And then the server replies with:
+
+    - zero or more [`InformationalResponse`][h11_mypyc.InformationalResponse] events,
+    - one [`Response`][h11_mypyc.Response] event,
+    - zero or more [`Data`][h11_mypyc.Data] events with the response body (if any),
+    - and an [`EndOfMessage`][h11_mypyc.EndOfMessage] event.
+
+And once that's finished, both sides either close the connection, or they go back
+to the top and re-use it for another request/response cycle.
+
+To coordinate this interaction, the h11-mypyc [`Connection`][h11_mypyc.Connection] object
+maintains several state machines: one that tracks what the client is doing, one
+that tracks what the server is doing, and a few more tiny ones to track whether
+[keep-alive](#keepalive-and-pipelining) is enabled and whether the client has
+proposed to [switch protocols](#switching-protocols). h11-mypyc always keeps track of
+all of these state machines, regardless of whether it's currently playing the
+client or server role.
+
+The state machines look like this:
+
+=== "Client"
+
+    ```mermaid
+    --8<-- "client-states.mmd"
+    ```
+
+=== "Server"
+
+    ```mermaid
+    --8<-- "server-states.mmd"
+    ```
+
+=== "Special states"
+
+    ```mermaid
+    --8<-- "special-states.mmd"
+    ```
+
+If you squint at the first two diagrams, you can see the client's IDLE ->
+SEND_BODY -> DONE path and the server's IDLE -> SEND_RESPONSE -> SEND_BODY ->
+DONE path, which encode the basic sequence of events we described above. But
+there's a fair amount of other stuff going on here as well.
+
+The first thing you should notice is the different colors. These correspond to
+the different ways that our state machines can change state.
+
+- Plain arcs are *event-triggered transitions*: if we're in state A, and this
+  event happens, then we switch to state B. For the client machine, these
+  transitions always happen when the client *sends* an event. For the server
+  machine, most of them involve the server sending an event, except that the
+  server also goes from IDLE -> SEND_RESPONSE when the client sends a
+  [`Request`][h11_mypyc.Request].
+
+- Green arcs are *state-triggered transitions*: these are somewhat unusual, and
+  are used to couple together the different state machines -- if, at any moment,
+  one machine is in state A and another machine is in state B, then the first
+  machine immediately transitions to state C. For example, if the CLIENT machine
+  is in state DONE, and the SERVER machine is in the CLOSED state, then the
+  CLIENT machine transitions to MUST_CLOSE. And the same thing happens if the
+  CLIENT machine is in the state DONE and the keep-alive machine is in the state
+  disabled.
+
+- There are also two purple arcs labeled
+  [`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle]: these correspond to an
+  explicit method call documented below.
+
+Here's why we have all the stuff in those diagrams above, beyond what's needed to
+handle the basic request/response cycle:
+
+- Server sending a [`Response`][h11_mypyc.Response] directly from `IDLE`: This is used
+  for error responses, when the client's request never arrived (e.g. 408 Request
+  Timed Out) or was unparseable gibberish (400 Bad Request) and thus didn't
+  register with our state machine as a real [`Request`][h11_mypyc.Request].
+
+- The transitions involving `MUST_CLOSE` and `CLOSED`: keep-alive and shutdown
+  handling; see [Re-using a connection](#keepalive-and-pipelining) and
+  [Closing connections](#closing).
+
+- The transitions involving `MIGHT_SWITCH_PROTOCOL` and `SWITCHED_PROTOCOL`: see
+  [Switching protocols](#switching-protocols).
+
+- That weird `ERROR` state hanging out all lonely on the bottom: to avoid
+  cluttering the diagram, we don't draw any arcs coming into this node, but that
+  doesn't mean it can't be entered. In fact, it can be entered from any state: if
+  any exception occurs while trying to send/receive data, then the corresponding
+  machine will transition directly to this state. Once there, though, it can
+  never leave -- that part of the diagram is accurate. See
+  [Error handling](#error-handling).
+
+And finally, note that in these diagrams, all the labels that are in *italics*
+are informal English descriptions of things that happen in the code, while the
+labels in upright text correspond to actual objects in the public API. You've
+already seen the event objects like [`Request`][h11_mypyc.Request] and
+[`Response`][h11_mypyc.Response]; there are also a set of opaque sentinel values that
+you can use to track and query the client and server's states.
+
+## Special constants
+
+h11-mypyc exposes some special constants corresponding to the different states in the
+client and server state machines described above. The complete list is:
+
+`IDLE`, `SEND_RESPONSE`, `SEND_BODY`, `DONE`, `MUST_CLOSE`, `CLOSED`,
+`MIGHT_SWITCH_PROTOCOL`, `SWITCHED_PROTOCOL`, `ERROR`
+
+For example, we can see that initially the client and server start in state
+`IDLE` / `IDLE`:
+
+```pycon
+>>> conn = h11_mypyc.Connection(our_role=h11_mypyc.CLIENT)
+>>> conn.states
+{<class 'h11_mypyc._state.CLIENT'>: <class 'h11_mypyc._state.IDLE'>, <class 'h11_mypyc._state.SERVER'>: <class 'h11_mypyc._state.IDLE'>}
+```
+
+And then if the client sends a [`Request`][h11_mypyc.Request], then the client switches
+to state `SEND_BODY`, while the server switches to state `SEND_RESPONSE`:
+
+```pycon
+>>> conn.send(h11_mypyc.Request(method="GET", target="/", headers=[("Host", "example.com")]))
+b'GET / HTTP/1.1\r\nHost: example.com\r\n\r\n'
+>>> conn.states
+{<class 'h11_mypyc._state.CLIENT'>: <class 'h11_mypyc._state.SEND_BODY'>, <class 'h11_mypyc._state.SERVER'>: <class 'h11_mypyc._state.SEND_RESPONSE'>}
+```
+
+And we can test these values directly using constants like `SEND_BODY`:
+
+```pycon
+>>> conn.states[h11_mypyc.CLIENT] is h11_mypyc.SEND_BODY
+True
+```
+
+This shows how the [`Connection`][h11_mypyc.Connection] type tracks these state
+machines and lets you query their current state.
+
+### Roles { #roles }
+
+The above also showed the special constants that can be used to indicate the two
+different roles that a peer can play in an HTTP connection: `CLIENT` and
+`SERVER`.
+
+And finally, there are also two special constants that can be returned from
+[`Connection.next_event()`][h11_mypyc.Connection.next_event]: `NEED_DATA` and `PAUSED`.
+
+### How the sentinels work { #sentinel-types }
+
+All of h11-mypyc's constants are *classes*, not instances -- they are never
+instantiated, and you compare them with `is`, the way you would compare against
+[`None`][]:
+
+```pycon
+>>> conn.states[h11_mypyc.CLIENT] is h11_mypyc.SEND_BODY
+True
+```
+
+Because they are classes, `type(some_sentinel)` is just [`type`][], so you cannot
+use `type()` to dispatch on the return value of
+[`Connection.next_event()`][h11_mypyc.Connection.next_event] the way you can for event
+objects. What you can do instead is dispatch on the value itself -- for example,
+with a handler table keyed on the sentinel, or by checking for the sentinels
+explicitly before falling back to `type(event)` for the real events:
+
+```python
+event = conn.next_event()
+if event is h11_mypyc.NEED_DATA:
+    ...
+elif event is h11_mypyc.PAUSED:
+    ...
+else:
+    handler = getattr(some_object, "handle_" + type(event).__name__)
+    handler(event)
+```
+
+Not that this kind of dispatch-based strategy is always the best approach -- but
+the option is there if you want it.
+
+!!! note
+
+    In h11 releases 0.7.0 through 0.16.0, the sentinels were instances of
+    themselves (`type(h11_mypyc.NEED_DATA) is h11_mypyc.NEED_DATA`), which made the plain
+    `type(event)` dispatch above work uniformly. That relied on a custom
+    metaclass, which mypyc cannot compile, so it was dropped. `is` comparisons
+    against the sentinels are unaffected.
+
+## The Connection object
+
+::: h11_mypyc.Connection
+    options:
+      members:
+        - receive_data
+        - next_event
+        - send
+        - send_with_data_passthrough
+        - send_failed
+        - start_next_cycle
+        - states
+        - our_state
+        - their_state
+        - trailing_data
+
+In addition to the members documented above, a
+[`Connection`][h11_mypyc.Connection] has the following attributes:
+
+`our_role`
+:   `CLIENT` if this is a client; `SERVER` if this is a server.
+
+`their_role`
+:   `SERVER` if this is a client; `CLIENT` if this is a server.
+
+`their_http_version`
+:   The version of HTTP that our peer claims to support. `None` if we haven't yet
+    received a request/response.
+
+    This is preserved by
+    [`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle], so it can be handy
+    for a client making multiple requests on the same connection: normally you
+    don't know what version of HTTP the server supports until after you do a
+    request and get a response -- so on an initial request you might have to
+    assume the worst. But on later requests on the same connection, the
+    information will be available here.
+
+`client_is_waiting_for_100_continue`
+:   True if the client sent a request with the `Expect: 100-continue` header, and
+    is still waiting for a response (i.e., the server has not sent a 100 Continue
+    or any other kind of response, and the client has not gone ahead and started
+    sending the body anyway).
+
+    See
+    [RFC 7231 section 5.1.1](https://tools.ietf.org/html/rfc7231#section-5.1.1)
+    for details.
+
+`they_are_waiting_for_100_continue`
+:   True if `their_role` is `CLIENT` and `client_is_waiting_for_100_continue`.
+
+## Error handling { #error-handling }
+
+Given the vagaries of networks and the folks on the other side of them, it's
+extremely important to be prepared for errors.
+
+Most errors in h11-mypyc are signaled by raising one of
+[`ProtocolError`][h11_mypyc.ProtocolError]'s two concrete subclasses,
+[`LocalProtocolError`][h11_mypyc.LocalProtocolError] and
+[`RemoteProtocolError`][h11_mypyc.RemoteProtocolError]:
+
+::: h11_mypyc.ProtocolError
+
+::: h11_mypyc.LocalProtocolError
+
+::: h11_mypyc.RemoteProtocolError
+
+There are four cases where these exceptions might be raised:
+
+- When trying to instantiate an event object
+  ([`LocalProtocolError`][h11_mypyc.LocalProtocolError]): This indicates that something
+  about your event is invalid. Your event wasn't constructed, but there are no
+  other consequences -- feel free to try again.
+
+- When calling
+  [`Connection.start_next_cycle()`][h11_mypyc.Connection.start_next_cycle]
+  ([`LocalProtocolError`][h11_mypyc.LocalProtocolError]): This indicates that the
+  connection is not ready to be re-used, because one or both of the peers are not
+  in the `DONE` state. The [`Connection`][h11_mypyc.Connection] object remains usable,
+  and you can try again later.
+
+- When calling [`Connection.next_event()`][h11_mypyc.Connection.next_event]
+  ([`RemoteProtocolError`][h11_mypyc.RemoteProtocolError]): This indicates that the
+  remote peer has violated our protocol assumptions. This is unrecoverable -- we
+  don't know what they're doing and we cannot safely proceed.
+  [`Connection.their_state`][h11_mypyc.Connection.their_state] immediately becomes
+  `ERROR`, and all further calls to
+  [`next_event()`][h11_mypyc.Connection.next_event] will also raise
+  [`RemoteProtocolError`][h11_mypyc.RemoteProtocolError].
+  [`Connection.send()`][h11_mypyc.Connection.send] still works as normal, so if you're
+  implementing a server and this happens then you have an opportunity to send
+  back a 400 Bad Request response. But aside from that, your only real option is
+  to close your socket and make a new connection.
+
+- When calling [`Connection.send()`][h11_mypyc.Connection.send] or
+  [`Connection.send_with_data_passthrough()`][h11_mypyc.Connection.send_with_data_passthrough]
+  ([`LocalProtocolError`][h11_mypyc.LocalProtocolError]): This indicates that *you*
+  violated our protocol assumptions. This is also unrecoverable -- h11-mypyc doesn't
+  know what you're doing, its internal state may be inconsistent, and we cannot
+  safely proceed. [`Connection.our_state`][h11_mypyc.Connection.our_state] immediately
+  becomes `ERROR`, and all further calls to
+  [`send()`][h11_mypyc.Connection.send] will also raise
+  [`LocalProtocolError`][h11_mypyc.LocalProtocolError]. The only thing you can
+  reasonably do at this point is to close your socket and make a new connection.
+
+So that's how h11-mypyc tells you about errors that it detects. In some cases, it's
+also useful to be able to tell h11-mypyc about an error that you detected. In
+particular, the [`Connection`][h11_mypyc.Connection] object assumes that after you call
+[`Connection.send()`][h11_mypyc.Connection.send], you actually send that data to the
+remote peer. But sometimes, for one reason or another, this doesn't actually
+happen.
+
+Here's a concrete example. Suppose you're using h11-mypyc to implement an HTTP client
+that keeps a pool of connections so it can re-use them when possible (see
+[Re-using a connection](#keepalive-and-pipelining)). You take a connection from
+the pool, and start to do a large upload... but then for some reason this gets
+cancelled (maybe you have a GUI and a user clicked "cancel"). This can cause
+h11-mypyc's model of this connection to diverge from reality: for example, h11-mypyc might
+think that you successfully sent the full request, because you passed an
+[`EndOfMessage`][h11_mypyc.EndOfMessage] object to
+[`Connection.send()`][h11_mypyc.Connection.send], but in fact you didn't, because you
+never sent the resulting bytes. And then -- here's the really tricky part! -- if
+you're not careful, you might think that it's OK to put this connection back into
+the connection pool and re-use it, because h11-mypyc is telling you that a full
+request/response cycle was completed. But this is wrong; in fact you have to
+close this connection and open a new one.
+
+The solution is simple: call
+[`Connection.send_failed()`][h11_mypyc.Connection.send_failed], and now h11-mypyc knows that
+your send failed. In this case,
+[`Connection.our_state`][h11_mypyc.Connection.our_state] immediately becomes `ERROR`,
+just like if you had tried to do something that violated the protocol.
+
+## Message body framing: `Content-Length` and all that { #framing }
+
+There are two different headers that HTTP/1.1 uses to indicate a framing
+mechanism for request/response bodies: `Content-Length` and `Transfer-Encoding`.
+Our general philosophy is that the way you tell h11-mypyc what configuration you want
+to use is by setting the appropriate headers in your request / response, and then
+h11-mypyc will both pass those headers on to the peer and encode the body
+appropriately.
+
+Currently, the only supported `Transfer-Encoding` is `chunked`.
+
+On requests, this means:
+
+- No `Content-Length` or `Transfer-Encoding`: no body, equivalent to
+  `Content-Length: 0`.
+
+- `Content-Length: ...`: You're going to send exactly the specified number of
+  bytes. h11-mypyc will keep track and signal an error if your
+  [`EndOfMessage`][h11_mypyc.EndOfMessage] doesn't happen at the right place.
+
+- `Transfer-Encoding: chunked`: You're going to send a variable / not yet known
+  number of bytes.
+
+    Note 1: only HTTP/1.1 servers are required to support
+    `Transfer-Encoding: chunked`, and as a client you have to decide whether to
+    send this header before you get to see what protocol version the server is
+    using.
+
+    Note 2: even though HTTP/1.1 servers are required to support
+    `Transfer-Encoding: chunked`, this doesn't necessarily mean that they
+    actually do -- e.g., applications using Python's standard WSGI API cannot
+    accept chunked requests.
+
+    Nonetheless, this is the only way to send a request where you don't know the
+    size of the body ahead of time, so if that's the situation you find yourself
+    in then you might as well try it and hope.
+
+On responses, things are a bit more subtle. There are effectively two cases:
+
+- `Content-Length: ...`: You're going to send exactly the specified number of
+  bytes. h11-mypyc will keep track and signal an error if your
+  [`EndOfMessage`][h11_mypyc.EndOfMessage] doesn't happen at the right place.
+
+- `Transfer-Encoding: chunked`, *or*, neither framing header is provided: These
+  two cases are handled differently at the wire level, but as far as the
+  application is concerned they provide (almost) exactly the same semantics: in
+  either case, you'll send a variable / not yet known number of bytes. The
+  difference between them is that `Transfer-Encoding: chunked` works better
+  (compatible with keep-alive, allows trailing headers, clearly distinguishes
+  between successful completion and network errors), but requires an HTTP/1.1
+  client; for HTTP/1.0 clients the only option is the no-headers approach where
+  you have to close the socket to indicate completion.
+
+    Since this is (almost) entirely a wire-level-encoding concern, h11-mypyc abstracts
+    it: when sending a response you can set either `Transfer-Encoding: chunked`
+    or leave off both framing headers, and h11-mypyc will treat both cases identically:
+    it will automatically pick the best option given the client's advertised HTTP
+    protocol level.
+
+    You need to watch out for this if you're using trailing headers (i.e., a
+    non-empty `headers` attribute on [`EndOfMessage`][h11_mypyc.EndOfMessage]), since
+    trailing headers are only legal if we actually ended up using
+    `Transfer-Encoding: chunked`. Trying to send a non-empty set of trailing
+    headers to a HTTP/1.0 client will raise a
+    [`LocalProtocolError`][h11_mypyc.LocalProtocolError]. If this use case is important
+    to you, check `Connection.their_http_version` to confirm that the client
+    speaks HTTP/1.1 before you attempt to send any trailing headers.
+
+## Re-using a connection: keep-alive and pipelining { #keepalive-and-pipelining }
+
+HTTP/1.1 allows a connection to be re-used for multiple request/response cycles
+(also known as "keep-alive"). This can make things faster by letting us skip the
+costly connection setup, but it does create some complexities: we have to keep
+track of whether a connection is reusable, and when there are multiple requests
+and responses flowing through the same connection we need to be careful not to
+get confused about which request goes with which response.
+
+h11-mypyc considers a connection to be reusable if, and only if, both sides (a) speak
+HTTP/1.1 (HTTP/1.0 did have some complex and fragile support for keep-alive
+bolted on, but h11-mypyc currently doesn't support that -- possibly this will be added
+in the future), and (b) neither side has explicitly disabled keep-alive by
+sending a `Connection: close` header.
+
+If you plan to make only a single request or response and then close the
+connection, you should manually set the `Connection: close` header in your
+request/response. h11-mypyc will notice and update its state appropriately.
+
+There are also some situations where you are required to send a
+`Connection: close` header, e.g. if you are a server talking to a client that
+doesn't support keep-alive. You don't need to worry about these cases -- h11-mypyc will
+automatically add this header when necessary. Just worry about setting it when
+it's actually something that you're actively choosing.
+
+If you want to re-use a connection, you have to wait until both the request and
+the response have been completed, bringing both the client and server to the
+`DONE` state. Once this has happened, you can explicitly call
+[`Connection.start_next_cycle()`][h11_mypyc.Connection.start_next_cycle] to reset both
+sides back to the `IDLE` state. This makes sure that the client and server remain
+synched up.
+
+If keep-alive is disabled for whatever reason -- someone set `Connection: close`,
+lack of protocol support, one of the sides just unilaterally closed the
+connection -- then the state machines will skip past the `DONE` state directly to
+the `MUST_CLOSE` or `CLOSED` states. In this case, trying to call
+[`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle] will raise an error, and
+the only thing you can legally do is to close this connection and make a new one.
+
+HTTP/1.1 also allows for a more aggressive form of connection re-use, in which a
+client sends multiple requests in quick succession, and then waits for the
+responses to stream back in order ("pipelining"). This is generally considered to
+have been a bad idea, because it makes things like error recovery very
+complicated.
+
+As a client, h11-mypyc does not support pipelining. This is enforced by the structure
+of the state machine: after sending one [`Request`][h11_mypyc.Request], you can't send
+another until after calling
+[`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle], and you can't call
+[`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle] until the server has
+entered the `DONE` state, which requires reading the server's full response.
+
+As a server, h11-mypyc provides the minimal support for pipelining required to comply
+with the HTTP/1.1 standard: if the client sends multiple pipelined requests, then
+we handle the first request until we reach the `DONE` state, and then
+[`next_event()`][h11_mypyc.Connection.next_event] will pause and refuse to parse any
+more events until the response is completed and
+[`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle] is called. See the next
+section for more details.
+
+## Flow control { #flow-control }
+
+Presumably you know when you want to send things, and the
+[`send()`][h11_mypyc.Connection.send] interface is very simple: it just immediately
+returns all the data you need to send for the given event, so you can apply
+whatever send buffer strategy you want. But reading from the remote peer is a bit
+trickier: you don't want to read data from the remote peer if it can't be
+processed (i.e., you want to apply backpressure and avoid building arbitrarily
+large in-memory buffers), and you definitely don't want to block waiting on data
+from the remote peer at the same time that it's blocked waiting for you, because
+that will cause a deadlock.
+
+One complication here is that if you're implementing a server, you have to be
+prepared to handle [`Request`][h11_mypyc.Request]s that have an `Expect: 100-continue`
+header. You can
+[read the spec](https://tools.ietf.org/html/rfc7231#section-5.1.1) for the full
+details, but basically what this header means is that after sending the
+[`Request`][h11_mypyc.Request], the client plans to pause and wait until they see some
+response from the server before they send that request's [`Data`][h11_mypyc.Data]. The
+server's response would normally be an
+[`InformationalResponse`][h11_mypyc.InformationalResponse] with status `100 Continue`,
+but it could be anything really (e.g. a full [`Response`][h11_mypyc.Response] with a
+4xx status code). The crucial thing as a server, though, is that you should never
+block trying to read a request body if the client is blocked waiting for you to
+tell them to send the request body.
+
+Fortunately, h11-mypyc makes this easy, because it tracks whether the client is in the
+waiting-for-100-continue state, and exposes this as
+`Connection.they_are_waiting_for_100_continue`. So you don't have to pay
+attention to the `Expect` header yourself; you just have to make sure that before
+you block waiting to read a request body, you execute some code like:
+
+```python
+if conn.they_are_waiting_for_100_continue:
+    do_send(conn, h11_mypyc.InformationalResponse(100, headers=[...]))
+do_read(...)
+```
+
+In fact, if you're lazy (and what programmer isn't?) then you can just do this
+check before all reads -- it's mandatory before blocking to read a request body,
+but it's safe at any time.
+
+And the other thing you want to pay attention to is the special values that
+[`next_event()`][h11_mypyc.Connection.next_event] might return: `NEED_DATA` and
+`PAUSED`.
+
+`NEED_DATA` is what it sounds like: it means that
+[`next_event()`][h11_mypyc.Connection.next_event] is guaranteed not to return any more
+real events until you've called
+[`receive_data()`][h11_mypyc.Connection.receive_data] at least once.
+
+`PAUSED` is a little more subtle: it means that
+[`next_event()`][h11_mypyc.Connection.next_event] is guaranteed not to return any more
+real events until something else has happened to clear up the paused state. There
+are three cases where this can happen:
+
+1. We received a full request/response from the remote peer, and then we received
+   some more data after that. (The main situation where this might happen is a
+   server responding to a pipelining client.) The `PAUSED` state will go away
+   after you call
+   [`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle].
+
+2. A successful `CONNECT` or `Upgrade:` request has caused the connection to
+   switch to some other protocol (see
+   [Switching protocols](#switching-protocols)). This `PAUSED` state is
+   permanent; you should abandon this [`Connection`][h11_mypyc.Connection] and go do
+   whatever it is you're going to do with your new protocol.
+
+3. We're a server, and the client we're talking to proposed to switch protocols
+   (see [Switching protocols](#switching-protocols)), and now is waiting to find
+   out whether their request was successful or not. Once we either accept or deny
+   their request then this will turn into one of the above two states, so you
+   probably don't need to worry about handling it specially.
+
+Putting all this together --
+
+If your I/O is organized around a "pull" strategy, where your code requests
+events as it's ready to handle them (e.g. classic synchronous code, or asyncio's
+`await loop.sock_recv(...)`, or
+[Trio's streams](https://trio.readthedocs.io/en/latest/reference-io.html#the-abstract-stream-api)),
+then you'll probably want logic that looks something like:
+
+```python
+# Replace do_sendall and do_recv with your I/O code
+def get_next_event():
+    while True:
+        event = conn.next_event()
+        if event is h11_mypyc.NEED_DATA:
+            if conn.they_are_waiting_for_100_continue:
+                do_sendall(conn, h11_mypyc.InformationalResponse(100, ...))
+            conn.receive_data(do_recv())
+            continue
+        return event
+```
+
+And then your code that calls this will need to make sure to call it only at
+appropriate times (e.g., not immediately after receiving
+[`EndOfMessage`][h11_mypyc.EndOfMessage] or `PAUSED`).
+
+If your I/O is organized around a "push" strategy, where the network drives
+processing (e.g. you're using [Twisted](https://twistedmatrix.com/), or
+implementing an [`asyncio.Protocol`][]), then you'll want to internally apply
+back-pressure whenever you see `PAUSED`, remove back-pressure when you call
+[`start_next_cycle()`][h11_mypyc.Connection.start_next_cycle], and otherwise just
+deliver events as they arrive. Something like:
+
+```python
+class HTTPProtocol(asyncio.Protocol):
+    # Save the transport for later -- needed to access the
+    # backpressure API.
+    def connection_made(self, transport):
+        self._transport = transport
+
+    # Internal helper function -- deliver all pending events
+    def _deliver_events(self):
+        while True:
+            event = self.conn.next_event()
+            if event is h11_mypyc.NEED_DATA:
+                break
+            elif event is h11_mypyc.PAUSED:
+                # Apply back-pressure
+                self._transport.pause_reading()
+                break
+            else:
+                self.event_received(event)
+
+    # Called by "someone" whenever new data appears on our socket
+    def data_received(self, data):
+        self.conn.receive_data(data)
+        self._deliver_events()
+
+    # Called by "someone" whenever the peer closes their socket
+    def eof_received(self):
+        self.conn.receive_data(b"")
+        self._deliver_events()
+        # asyncio will close our socket unless we return True here.
+        return True
+
+    # Called by your code when it's ready to start a new
+    # request/response cycle
+    def start_next_cycle(self):
+        self.conn.start_next_cycle()
+        # New events might have been buffered internally, and only
+        # become deliverable after calling start_next_cycle
+        self._deliver_events()
+        # Remove back-pressure
+        self._transport.resume_reading()
+
+    # Fill in your code here
+    def event_received(self, event):
+        ...
+```
+
+And your code that uses this will have to remember to check for
+`they_are_waiting_for_100_continue` at the appropriate time.
+
+## Closing connections { #closing }
+
+h11-mypyc represents a connection shutdown with the special event type
+[`ConnectionClosed`][h11_mypyc.ConnectionClosed]. You can send this event, in which
+case [`send()`][h11_mypyc.Connection.send] will simply update the state machine and
+then return `None`. You can receive this event, if you call
+`conn.receive_data(b"")`. (The actual receipt might be delayed if the connection
+is [paused](#flow-control).) It's safe and legal to call
+`conn.receive_data(b"")` multiple times, and once you've done this once, then all
+future calls to [`receive_data()`][h11_mypyc.Connection.receive_data] will also return
+`ConnectionClosed()`:
+
+```pycon
+>>> conn = h11_mypyc.Connection(our_role=h11_mypyc.CLIENT)
+>>> conn.receive_data(b"")
+>>> conn.receive_data(b"")
+>>> conn.receive_data(None)
+```
+
+(Or if you try to actually pass new data in after calling
+`conn.receive_data(b"")`, that will raise an exception.)
+
+h11-mypyc is careful about interpreting connection closure in a *half-duplex fashion*.
+TCP sockets pretend to be a two-way connection, but really they're two one-way
+connections. In particular, it's possible for one party to shut down their
+sending connection -- which causes the other side to be notified that the
+connection has closed via the usual `socket.recv(...) -> b""` mechanism -- while
+still being able to read from their receiving connection. (On Unix, this is
+generally accomplished via the `shutdown(2)` system call.) So, for example, a
+client could send a request, and then close their socket for writing to indicate
+that they won't be sending any more requests, and then read the response. It's
+this kind of closure that is indicated by h11-mypyc's
+[`ConnectionClosed`][h11_mypyc.ConnectionClosed]: it means that this party will not be
+sending any more data -- nothing more, nothing less. You can see this reflected
+in the [state machine](#state-machine), in which one party transitioning to
+`CLOSED` doesn't immediately halt the connection, but merely prevents it from
+continuing for another request/response cycle.
+
+The state machine also indicates that
+[`ConnectionClosed`][h11_mypyc.ConnectionClosed] events can only happen in certain
+states. This isn't true, of course -- any party can close their connection at any
+time, and h11-mypyc can't stop them. But what h11-mypyc can do is distinguish between clean
+and unclean closes. For example, if both sides complete a request/response cycle
+and then close the connection, that's a clean closure and everyone will transition
+to the `CLOSED` state in an orderly fashion. On the other hand, if one party
+suddenly closes the connection while they're in the middle of sending a chunked
+response body, or when they promised a `Content-Length:` of 1000 bytes but have
+only sent 500, then h11-mypyc knows that this is a violation of the HTTP protocol, and
+will raise a [`ProtocolError`][h11_mypyc.ProtocolError]. Basically h11-mypyc treats an
+unexpected close the same way it would treat unexpected, uninterpretable data
+arriving -- it lets you know that something has gone wrong.
+
+As a client, the proper way to perform a single request and then close the
+connection is:
+
+1. Send a [`Request`][h11_mypyc.Request] with `Connection: close`
+
+2. Send the rest of the request body
+
+3. Read the server's [`Response`][h11_mypyc.Response] and body
+
+4. `conn.our_state is h11_mypyc.MUST_CLOSE` will now be true. Call
+   `conn.send(ConnectionClosed())` and then close the socket. Or really you could
+   just close the socket -- the thing calling `send` will do is raise an error if
+   you're not in `MUST_CLOSE` as expected. So it's between you and your conscience
+   and your code reviewers.
+
+(Technically it would also be legal to shutdown your socket for writing as step
+2.5, but this doesn't serve any purpose and some buggy servers might get annoyed,
+so it's not recommended.)
+
+As a server, the proper way to perform a response is:
+
+1. Send your [`Response`][h11_mypyc.Response] and body
+
+2. Check if `conn.our_state is h11_mypyc.MUST_CLOSE`. This might happen for a variety
+   of reasons; for example, if the response had unknown length and the client
+   speaks only HTTP/1.0, then the client will not consider the connection
+   complete until we issue a close.
+
+You should be particularly careful to take into consideration the following note
+from [RFC 7230 section 6.6](https://tools.ietf.org/html/rfc7230#section-6.6):
+
+> If a server performs an immediate close of a TCP connection, there is a
+> significant risk that the client will not be able to read the last HTTP
+> response. If the server receives additional data from the client on a fully
+> closed connection, such as another request that was sent by the client before
+> receiving the server's response, the server's TCP stack will send a reset packet
+> to the client; unfortunately, the reset packet might erase the client's
+> unacknowledged input buffers before they can be read and interpreted by the
+> client's HTTP parser.
+>
+> To avoid the TCP reset problem, servers typically close a connection in stages.
+> First, the server performs a half-close by closing only the write side of the
+> read/write connection. The server then continues to read from the connection
+> until it receives a corresponding close by the client, or until the server is
+> reasonably certain that its own TCP stack has received the client's
+> acknowledgement of the packet(s) containing the server's last response. Finally,
+> the server fully closes the connection.
+
+## Switching protocols { #switching-protocols }
+
+h11-mypyc supports two kinds of "protocol switches": requests with method `CONNECT`,
+and the newer `Upgrade:` header, most commonly used for negotiating WebSocket
+connections. Both follow the same pattern: the client proposes that they switch
+from regular HTTP to some other kind of interaction, and then the server either
+rejects the suggestion -- in which case we return to regular HTTP rules -- or
+else accepts it. (For `CONNECT`, acceptance means a response with 2xx status
+code; for `Upgrade:`, acceptance means an
+[`InformationalResponse`][h11_mypyc.InformationalResponse] with status
+`101 Switching Protocols`.) If the proposal is accepted, then both sides switch
+to doing something else with their socket, and h11-mypyc's job is done.
+
+As a developer using h11-mypyc, it's your responsibility to send and interpret the
+actual `CONNECT` or `Upgrade:` request and response, and to figure out what to do
+after the handover; it's h11-mypyc's job to understand what's going on, and help you
+make the handover smoothly.
+
+Specifically, what h11-mypyc does is [pause](#flow-control) parsing incoming data at
+the boundary between the two protocols, and then you can retrieve any unprocessed
+data from the [`Connection.trailing_data`][h11_mypyc.Connection.trailing_data]
+attribute.
+
+## Support for `sendfile()` { #sendfile }
+
+Many networking APIs provide some efficient way to send particular data, e.g.
+asking the operating system to stream files directly off of the disk and into a
+socket without passing through userspace.
+
+It's possible to use these APIs together with h11-mypyc. The basic strategy is:
+
+- Create some placeholder object representing the special data, that your
+  networking code knows how to "send" by invoking whatever the appropriate
+  underlying APIs are.
+
+- Make sure your placeholder object implements a `__len__` method returning its
+  size in bytes.
+
+- Call `conn.send_with_data_passthrough(Data(data=<your placeholder object>))`
+
+- This returns a list whose contents are a mixture of (a) bytes-like objects, and
+  (b) your placeholder object. You should send them to the network in order.
+
+Here's a sketch of what this might look like:
+
+```python
+class FilePlaceholder:
+    def __init__(self, file, offset, count):
+        self.file = file
+        self.offset = offset
+        self.count = count
+
+    def __len__(self):
+        return self.count
+
+def send_data(sock, data):
+    if isinstance(data, FilePlaceholder):
+        # socket.sendfile added in Python 3.5
+        sock.sendfile(data.file, data.offset, data.count)
+    else:
+        # data is a bytes-like object to be sent directly
+        sock.sendall(data)
+
+placeholder = FilePlaceholder(open("...", "rb"), 0, 200)
+for data in conn.send_with_data_passthrough(Data(data=placeholder)):
+    send_data(sock, data)
+```
+
+This works with all the different framing modes (`Content-Length`,
+`Transfer-Encoding: chunked`, etc.) -- h11-mypyc will add any necessary framing data,
+update its internal state, and away you go.
+
+## Identifying h11-mypyc in requests and responses
+
+According to RFC 7231, client requests are supposed to include a `User-Agent:`
+header identifying what software they're using, and servers are supposed to
+respond with a `Server:` header doing the same. h11-mypyc doesn't construct these
+headers for you, but to make it easier for you to construct this header, it
+provides `h11_mypyc.PRODUCT_ID`: a string suitable for identifying the current version
+of h11-mypyc in a `User-Agent:` or `Server:` header.
+
+The version of h11-mypyc that was used to build these docs identified itself as:
+
+```pycon
+>>> h11_mypyc.PRODUCT_ID
+'python-h11-mypyc/0.17.0'
+```
+
+## Chunked Transfer Encoding Delimiters { #chunk-delimiters-are-bad }
+
+!!! info "Added in version 0.7.0"
+
+HTTP/1.1 allows for the use of Chunked Transfer Encoding to frame request and
+response bodies. This form of transfer encoding allows the implementation to
+provide its body data in the form of length-prefixed "chunks" of data.
+
+RFC 7230 is extremely clear that the breaking points between chunks of data are
+non-semantic: that is, users should not rely on them or assign any meaning to
+them. This is particularly important given that RFC 7230 also allows
+intermediaries such as proxies and caches to change the chunk boundaries as they
+see fit, or even to remove the chunked transfer encoding entirely.
+
+However, for some applications it is valuable or essential to see the chunk
+boundaries because the peer implementation has assigned meaning to them. While
+this is against the specification, if you do really need access to this
+information h11-mypyc makes it available to you in the form of the `Data.chunk_start`
+and `Data.chunk_end` properties of the [`Data`][h11_mypyc.Data] event.
+
+`Data.chunk_start` is set to `True` for the first [`Data`][h11_mypyc.Data] event for a
+given chunk of data. `Data.chunk_end` is set to `True` for the last
+[`Data`][h11_mypyc.Data] event that is emitted for a given chunk of data. h11-mypyc
+guarantees that it will always emit at least one [`Data`][h11_mypyc.Data] event for
+each chunk of data received from the remote peer, but due to its internal
+buffering logic it may return more than one. It is possible for a single
+[`Data`][h11_mypyc.Data] event to have both `Data.chunk_start` and `Data.chunk_end` set
+to `True`, in which case it will be the only [`Data`][h11_mypyc.Data] event for that
+chunk of data.
+
+Again, it is *strongly encouraged* that you avoid relying on this information if
+at all possible. This functionality should be considered an escape hatch for when
+there is no alternative but to rely on the information, rather than a general
+source of data that is worth relying on.

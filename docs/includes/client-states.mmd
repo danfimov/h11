@@ -1,0 +1,33 @@
+---
+config:
+  flowchart:
+    useMaxWidth: false
+    nodeSpacing: 55
+    rankSpacing: 70
+---
+flowchart TD
+    IDLE(["IDLE<br><i>start state</i>"])
+    ERROR(["ERROR"])
+    CLOSED -->|"ConnectionClosed"| CLOSED
+    DONE -->|"ConnectionClosed"| CLOSED
+    DONE -->|"start_next_cycle()"| IDLE
+    DONE -->|"<i>switch proposal<br>pending</i>"| MIGHT_SWITCH_PROTOCOL
+    DONE -->|"<i>keep-alive<br>is disabled</i>"| MUST_CLOSE
+    DONE -->|"<i>peer in</i><br>CLOSED"| MUST_CLOSE
+    DONE -->|"<i>peer in</i><br>ERROR"| MUST_CLOSE
+    IDLE -->|"ConnectionClosed"| CLOSED
+    IDLE -->|"<i>peer in</i><br>CLOSED"| MUST_CLOSE
+    IDLE -->|"Request"| SEND_BODY
+    MIGHT_SWITCH_PROTOCOL -->|"<i>no switch proposal<br>pending</i>"| DONE
+    MIGHT_SWITCH_PROTOCOL -->|"<i>peer in</i><br>SWITCHED_PROTOCOL"| SWITCHED_PROTOCOL
+    MUST_CLOSE -->|"ConnectionClosed"| CLOSED
+    SEND_BODY -->|"EndOfMessage"| DONE
+    SEND_BODY -->|"Data"| SEND_BODY
+    linkStyle 2 stroke:#ab47bc,color:#ab47bc,stroke-width:2px
+    linkStyle 3 stroke:#43a047,color:#43a047,stroke-width:2px
+    linkStyle 4 stroke:#43a047,color:#43a047,stroke-width:2px
+    linkStyle 5 stroke:#43a047,color:#43a047,stroke-width:2px
+    linkStyle 6 stroke:#43a047,color:#43a047,stroke-width:2px
+    linkStyle 8 stroke:#43a047,color:#43a047,stroke-width:2px
+    linkStyle 10 stroke:#43a047,color:#43a047,stroke-width:2px
+    linkStyle 11 stroke:#43a047,color:#43a047,stroke-width:2px

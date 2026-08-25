@@ -4,10 +4,10 @@
     "version": 1,
 
     // The name of the project being benchmarked
-    "project": "h11",
+    "project": "h11-mypyc",
 
     // The project's homepage
-    "project_url": "https://h11.readthedocs.io/",
+    "project_url": "https://danfimov.github.io/h11/",
 
     // The URL or local path of the source code repository for the
     // project being benchmarked

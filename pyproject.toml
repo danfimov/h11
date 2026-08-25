@@ -1,46 +1,111 @@
-[tool.towncrier]
-# Usage:
-# - PRs should drop a file like "issuenumber.feature" in newsfragments
-#   (or "bugfix", "doc", "removal", "misc"; misc gets no text, we can
-#    customize this)
-# - At release time after bumping version number, run: towncrier
-#   (or towncrier --draft)
-package = "h11"
-filename = "docs/source/changes.rst"
-directory = "newsfragments"
-underlines = ["-", "~", "^"]
-issue_format = "`#{issue} <https://github.com/python-hyper/h11/issues/{issue}>`__"
+[build-system]
+requires = ["setuptools>=77", "mypy==2.3.1"]
+build-backend = "setuptools.build_meta"
 
-# Unfortunately there's no way to simply override
-# tool.towncrier.type.misc.showcontent
+[project]
+name = 'h11-mypyc'
+description = "A bring-your-own-I/O implementation of HTTP/1.1, compiled with mypyc"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE.txt"]
+authors = [
+    { name = "Nathaniel J. Smith", email = "njs@pobox.com" },
+    { name = "Dima Anfimov", email = "lovesolaristics@gmail.com" },
+]
+classifiers=[
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: System :: Networking",
+]
+dynamic = ["version"]
+requires-python = '>=3.10'
+dependencies = []
 
-[[tool.towncrier.type]]
-directory = "feature"
-name = "Features"
-showcontent = true
+[project.urls]
+Repository = "https://github.com/danfimov/h11"
+Homepage = "danfimov.github.io/h11/"
+Documentation = "danfimov.github.io/h11/"
+Changelog = "danfimov.github.io/h11/changes/"
 
-[[tool.towncrier.type]]
-directory = "bugfix"
-name = "Bugfixes"
-showcontent = true
+[dependency-groups]
+dev = [
+    "prek>=0.4.14",
+    {include-group = "build"},
+    {include-group = "lint"},
+    {include-group = "test"},
+    {include-group = "docs"},
+]
+build = [
+    "mypy>=2.3.1",
+    "setuptools>=77",
+]
+lint = [
+    "ruff>=0.16.4",
+    "zizmor>=1.29.0",
+]
+test = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-memray>=1.10.0",
+    "pytest-codspeed>=5.0.3",
+]
+docs = [
+    "mkdocstrings-python>=1.20.0",
+    "zensical>=0.0.57",
+]
 
-[[tool.towncrier.type]]
-directory = "doc"
-name = "Improved Documentation"
-showcontent = true
+[tool.setuptools]
+packages = ["h11_mypyc"]
 
-[[tool.towncrier.type]]
-directory = "removal"
-name = "Deprecations and Removals"
-showcontent = true
+[tool.setuptools.dynamic]
+version = { attr = "h11_mypyc._version.__version__" }
 
-[[tool.towncrier.type]]
-directory = "misc"
-name = "Miscellaneous internal changes"
-showcontent = true
+[tool.setuptools.package-data]
+h11_mypyc = ["py.typed"]
 
 [tool.mypy]
 strict = true
 warn_unused_configs = true
 warn_unused_ignores = true
 show_error_codes = true
+
+[tool.ruff]
+line-length = 120
+src = ["h11_mypyc", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "I",   # isort
+    "E",   # pycodestyle (errors)
+    "F",   # pyflakes
+    "UP",  # pyupgrade
+]
+
+[tool.cibuildwheel]
+# PyPy is excluded on purpose: mypyc-compiled code is slower there than the
+# pure-Python build, which PyPy will get from the py3-none-any wheel instead.
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "*_i686 *-win32 *-musllinux_i686"
+build-frontend = "build[uv]"
+environment = { H11_MYPYC = "1" }
+# The compiled build is where annotations become runtime checks, so a wheel that
+# imports fine can still fail on real traffic. Run the suite against each one.
+#
+# test-sources copies the tests into the test working directory rather than
+# running them from the checkout. Pointing pytest at {project}/tests instead
+# would make it treat the project as rootdir and put the h11_mypyc/ sources on
+# sys.path ahead of site-packages, so the tests would silently exercise the
+# interpreted source rather than the wheel just built.
+test-sources = ["tests"]
+test-command = "pytest tests -q"
+test-requires = ["pytest"]

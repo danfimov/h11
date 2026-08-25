@@ -1,4 +1,4 @@
-# A simple HTTP server implemented using h11 and Trio:
+# A simple HTTP server implemented using h11_mypyc and Trio:
 #   http://trio.readthedocs.io/en/latest/index.html
 #
 # All requests get echoed back a JSON document containing information about
@@ -79,9 +79,8 @@ import email.utils
 import json
 from itertools import count
 
+import h11_mypyc
 import trio
-
-import h11
 
 MAX_RECV = 2**16
 TIMEOUT = 10
@@ -98,12 +97,12 @@ TIMEOUT = 10
 def format_date_time(dt=None):
     """Generate a RFC 7231 / RFC 9110 IMF-fixdate string"""
     if dt is None:
-        dt = datetime.datetime.now(datetime.timezone.utc)
+        dt = datetime.datetime.now(datetime.UTC)
     return email.utils.format_datetime(dt, usegmt=True)
 
 
 ################################################################
-# I/O adapter: h11 <-> trio
+# I/O adapter: h11_mypyc <-> trio
 ################################################################
 
 
@@ -115,11 +114,11 @@ class TrioHTTPWrapper:
 
     def __init__(self, stream):
         self.stream = stream
-        self.conn = h11.Connection(h11.SERVER)
+        self.conn = h11_mypyc.Connection(h11_mypyc.SERVER)
         # Our Server: header
-        self.ident = " ".join(
-            [f"h11-example-trio-server/{h11.__version__}", h11.PRODUCT_ID]
-        ).encode("ascii")
+        self.ident = " ".join([f"h11-mypyc-example-trio-server/{h11_mypyc.__version__}", h11_mypyc.PRODUCT_ID]).encode(
+            "ascii"
+        )
         # A unique id for this connection, to include in debugging output
         # (useful for understanding what's going on if there are multiple
         # simultaneous clients).
@@ -129,7 +128,7 @@ class TrioHTTPWrapper:
         # The code below doesn't send ConnectionClosed, so we don't bother
         # handling it here either -- it would require that we do something
         # appropriate when 'data' is None.
-        assert type(event) is not h11.ConnectionClosed
+        assert type(event) is not h11_mypyc.ConnectionClosed
         data = self.conn.send(event)
         try:
             await self.stream.send_all(data)
@@ -142,9 +141,7 @@ class TrioHTTPWrapper:
     async def _read_from_peer(self):
         if self.conn.they_are_waiting_for_100_continue:
             self.info("Sending 100 Continue")
-            go_ahead = h11.InformationalResponse(
-                status_code=100, headers=self.basic_headers()
-            )
+            go_ahead = h11_mypyc.InformationalResponse(status_code=100, headers=self.basic_headers())
             await self.send(go_ahead)
         try:
             data = await self.stream.receive_some(MAX_RECV)
@@ -156,7 +153,7 @@ class TrioHTTPWrapper:
     async def next_event(self):
         while True:
             event = self.conn.next_event()
-            if event is h11.NEED_DATA:
+            if event is h11_mypyc.NEED_DATA:
                 await self._read_from_peer()
                 continue
             return event
@@ -236,27 +233,27 @@ class TrioHTTPWrapper:
 # But these all have one thing in common: they involve us leaving the
 # nice easy path up above. So we can just proceed on the assumption
 # that the nice easy thing is what's happening, and whenever something
-# goes wrong do our best to get back onto that path, and h11 will keep
+# goes wrong do our best to get back onto that path, and h11_mypyc will keep
 # track of how successful we were and raise new errors if things don't work
 # out.
 async def http_serve(stream):
     wrapper = TrioHTTPWrapper(stream)
     wrapper.info("Got new connection")
     while True:
-        assert wrapper.conn.states == {h11.CLIENT: h11.IDLE, h11.SERVER: h11.IDLE}
+        assert wrapper.conn.states == {h11_mypyc.CLIENT: h11_mypyc.IDLE, h11_mypyc.SERVER: h11_mypyc.IDLE}
 
         try:
             with trio.fail_after(TIMEOUT):
                 wrapper.info("Server main loop waiting for request")
                 event = await wrapper.next_event()
                 wrapper.info("Server main loop got event:", event)
-                if type(event) is h11.Request:
+                if type(event) is h11_mypyc.Request:
                     await send_echo_response(wrapper, event)
         except Exception as exc:
             wrapper.info(f"Error during response handler: {exc!r}")
             await maybe_send_error_response(wrapper, exc)
 
-        if wrapper.conn.our_state is h11.MUST_CLOSE:
+        if wrapper.conn.our_state is h11_mypyc.MUST_CLOSE:
             wrapper.info("connection is not reusable, so shutting down")
             await wrapper.shutdown_and_clean_up()
             return
@@ -264,12 +261,10 @@ async def http_serve(stream):
             try:
                 wrapper.info("trying to re-use connection")
                 wrapper.conn.start_next_cycle()
-            except h11.ProtocolError:
+            except h11_mypyc.ProtocolError:
                 states = wrapper.conn.states
                 wrapper.info("unexpected state", states, "-- bailing out")
-                await maybe_send_error_response(
-                    wrapper, RuntimeError(f"unexpected state {states}")
-                )
+                await maybe_send_error_response(wrapper, RuntimeError(f"unexpected state {states}"))
                 await wrapper.shutdown_and_clean_up()
                 return
 
@@ -285,29 +280,27 @@ async def send_simple_response(wrapper, status_code, content_type, body):
     headers = wrapper.basic_headers()
     headers.append(("Content-Type", content_type))
     headers.append(("Content-Length", str(len(body))))
-    res = h11.Response(status_code=status_code, headers=headers)
+    res = h11_mypyc.Response(status_code=status_code, headers=headers)
     await wrapper.send(res)
-    await wrapper.send(h11.Data(data=body))
-    await wrapper.send(h11.EndOfMessage())
+    await wrapper.send(h11_mypyc.Data(data=body))
+    await wrapper.send(h11_mypyc.EndOfMessage())
 
 
 async def maybe_send_error_response(wrapper, exc):
     # If we can't send an error, oh well, nothing to be done
     wrapper.info("trying to send error response...")
-    if wrapper.conn.our_state not in {h11.IDLE, h11.SEND_RESPONSE}:
+    if wrapper.conn.our_state not in {h11_mypyc.IDLE, h11_mypyc.SEND_RESPONSE}:
         wrapper.info("...but I can't, because our state is", wrapper.conn.our_state)
         return
     try:
-        if isinstance(exc, h11.RemoteProtocolError):
+        if isinstance(exc, h11_mypyc.RemoteProtocolError):
             status_code = exc.error_status_hint
         elif isinstance(exc, trio.TooSlowError):
             status_code = 408  # Request Timeout
         else:
             status_code = 500
         body = str(exc).encode("utf-8")
-        await send_simple_response(
-            wrapper, status_code, "text/plain; charset=utf-8", body
-        )
+        await send_simple_response(wrapper, status_code, "text/plain; charset=utf-8", body)
     except Exception as exc:
         wrapper.info("error while sending error response:", exc)
 
@@ -321,25 +314,18 @@ async def send_echo_response(wrapper, request):
     response_json = {
         "method": request.method.decode("ascii"),
         "target": request.target.decode("ascii"),
-        "headers": [
-            (name.decode("ascii"), value.decode("ascii"))
-            for (name, value) in request.headers
-        ],
+        "headers": [(name.decode("ascii"), value.decode("ascii")) for (name, value) in request.headers],
         "body": "",
     }
     while True:
         event = await wrapper.next_event()
-        if type(event) is h11.EndOfMessage:
+        if type(event) is h11_mypyc.EndOfMessage:
             break
-        assert type(event) is h11.Data
+        assert type(event) is h11_mypyc.Data
         response_json["body"] += event.data.decode("ascii")
-    response_body_unicode = json.dumps(
-        response_json, sort_keys=True, indent=4, separators=(",", ": ")
-    )
+    response_body_unicode = json.dumps(response_json, sort_keys=True, indent=4, separators=(",", ": "))
     response_body_bytes = response_body_unicode.encode("utf-8")
-    await send_simple_response(
-        wrapper, 200, "application/json; charset=utf-8", response_body_bytes
-    )
+    await send_simple_response(wrapper, 200, "application/json; charset=utf-8", response_body_bytes)
 
 
 async def serve(port):

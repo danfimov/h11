@@ -1,0 +1,11 @@
+[pytest]
+pythonpath = ["h11_mypyc", "."]
+testpaths = ["tests"]
+addopts = [
+    "--durations=10",
+    "--durations-min=1.0",
+
+    "-p no:pastebin",
+    "-p no:doctest",
+    "-p no:legacypath",
+]
