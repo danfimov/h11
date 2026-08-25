@@ -1,5 +1,4 @@
-include LICENSE.txt README.rst notes.org tiny-client-demo.py h11/py.typed
-recursive-include docs *
-recursive-include h11/tests *
-recursive-include fuzz *
-prune docs/build
+prune tests
+prune docs
+prune fuzz
+global-exclude __pycache__ *.py[cod]

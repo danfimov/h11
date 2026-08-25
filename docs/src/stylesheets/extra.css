@@ -1,0 +1,12 @@
+/* The state-machine diagrams are generated with Mermaid's `useMaxWidth: false`,
+   because shrinking them to the content column made their edge labels
+   unreadable. That means they render at their natural size, so the block they
+   live in has to scroll rather than spill over the page. */
+.mermaid {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.mermaid > svg {
+  max-width: none;
+}

@@ -1,0 +1,20 @@
+---
+config:
+  flowchart:
+    useMaxWidth: false
+    nodeSpacing: 55
+    rankSpacing: 70
+---
+flowchart TD
+    kaT(["<i>keep-alive is enabled</i><br><i>initial state</i>"])
+    kaF(["<i>keep-alive is disabled</i>"])
+    upF(["<i>No potential Upgrade: pending</i><br><i>initial state</i>"])
+    upT(["<i>Potential Upgrade: pending</i>"])
+    coF(["<i>No potential CONNECT pending</i><br><i>initial state</i>"])
+    coT(["<i>Potential CONNECT pending</i>"])
+    coF -->|"<i>Request with CONNECT</i>"| coT
+    coT -->|"<i>Response without 2xx status</i>"| coF
+    kaF -->|"<i>Request/response with<br>HTTP/1.0 or Connection: close</i>"| kaF
+    kaT -->|"<i>Request/response with<br>HTTP/1.0 or Connection: close</i>"| kaF
+    upF -->|"<i>Request with Upgrade:</i>"| upT
+    upT -->|"<i>Response</i>"| upF

@@ -1,35 +1,24 @@
-from setuptools import setup, find_packages
+import os
 
-# defines __version__
-exec(open("h11/_version.py").read())
+from setuptools import setup
 
-setup(
-    name="h11",
-    version=__version__,
-    description=
-        "A pure-Python, bring-your-own-I/O implementation of HTTP/1.1",
-    long_description=open("README.rst").read(),
-    author="Nathaniel J. Smith",
-    author_email="njs@pobox.com",
-    license="MIT",
-    packages=find_packages(exclude=["h11.tests"]),
-    package_data={'h11': ['py.typed']},
-    url="https://github.com/python-hyper/h11",
-    python_requires=">=3.8",
-    classifiers=[
-        "Development Status :: 3 - Alpha",
-        "Intended Audience :: Developers",
-        "License :: OSI Approved :: MIT License",
-        "Programming Language :: Python :: Implementation :: CPython",
-        "Programming Language :: Python :: Implementation :: PyPy",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3 :: Only",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Topic :: Internet :: WWW/HTTP",
-        "Topic :: System :: Networking",
-    ],
-)
+MYPYC_MODULES = [
+    "h11_mypyc/_abnf.py",
+    "h11_mypyc/_util.py",
+    "h11_mypyc/_receivebuffer.py",
+    "h11_mypyc/_headers.py",
+    "h11_mypyc/_events.py",
+    "h11_mypyc/_readers.py",
+    "h11_mypyc/_writers.py",
+    "h11_mypyc/_state.py",
+    "h11_mypyc/_connection.py",
+]
+
+if os.environ.get("H11_MYPYC") == "1":
+    # Imported lazily: mypyc is not in build-system.requires, so it is absent
+    # from the isolated build env used for the pure-Python path.
+    from mypyc.build import mypycify
+
+    setup(ext_modules=mypycify(MYPYC_MODULES))
+else:
+    setup()

@@ -1,7 +1,7 @@
 # Write the benchmarking functions here.
 # See "Writing benchmarks" in the asv docs for more information.
 
-import h11
+import h11_mypyc as h11
 
 
 # Basic ASV benchmark of core functionality

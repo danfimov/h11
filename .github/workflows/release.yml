@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: read
+
+env:
+  CIBW_BUILD_VERBOSITY: 1
+
+jobs:
+  compiled-wheels:
+    name: Compiled wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, macos-13, windows-latest]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Set version from tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pathlib, re
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          path = pathlib.Path("h11_mypyc/_version.py")
+          path.write_text(
+              re.sub(r"^__version__ = .*$", f'__version__ = "{version}"', path.read_text(), flags=re.M)
+          )
+          print("building h11_mypyc", version)
+          PY
+
+      - uses: pypa/cibuildwheel@1828c10ab37f080699c7b81cea34097c684a7074 # v4.2.0
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  sdist-and-pure-wheel:
+    name: sdist and pure-Python wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: false
+          version: "latest"
+          python-version: "3.12"
+
+      - name: Set version from tag
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          sed -i "s/^__version__ = .*/__version__ = \"${version}\"/" h11_mypyc/_version.py
+          echo "Building h11_mypyc ${version}"
+
+      - name: Build
+        run: |
+          set -euxo pipefail
+          uv build
+          ls -l dist
+          # A platform-tagged wheel here would mean H11_MYPYC leaked in and the
+          # fallback is gone, leaving PyPy with nothing to install.
+          ls dist/*-py3-none-any.whl
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sdist-and-pure-wheel
+          path: dist/*
+
+  publish:
+    name: Publish to PyPI
+    needs: [compiled-wheels, sdist-and-pure-wheel]
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    permissions:
+      contents: read
+      id-token: write # trusted publishing to PyPI
+    steps:
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: false
+          version: "latest"
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show what is being published
+        run: ls -l dist
+
+      - name: Publish
+        run: uv publish --trusted-publishing always dist/*

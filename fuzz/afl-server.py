@@ -6,7 +6,6 @@ import os
 import sys
 
 import afl
-
 import h11
 
 
